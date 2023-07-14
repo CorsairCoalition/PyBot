@@ -9,7 +9,6 @@ class RandomBot(PythonBot):
 
     def do_turn(self) -> None:
 
-        print(f'turn: {self.game.turn}')
         # Get a list of all the territories that we own
         moveable_units = self.game.map.get_moveable_army_tiles()
         if len(moveable_units) == 0:
