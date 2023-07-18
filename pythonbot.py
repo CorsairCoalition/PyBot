@@ -165,6 +165,14 @@ class Map:
 
 
 class Move(NamedTuple):
+    """A NamedTuple representing a move on the game board.
+    
+    Args:
+        start (int): the tile to move from
+        end (int): the tile to move to
+        is50 (bool, optional): If true, only half of the army will be moved. Defaults to False.
+        interrupt (bool, optional): If True, the server-side movement queue will be cleared. Defaults to False. 
+    """
     start: int
     end: int
     is50: bool = False
