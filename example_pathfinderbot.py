@@ -13,7 +13,10 @@ class PathFinderBot(PythonBot):
 
     def do_turn(self) -> None:
 
-        if self.game.turn % self.WAIT_TURN_INTERVAL != 0:
+        if self.queued_moves > 0:
+            return # wait for queued moves to execute
+
+        if self.game.tick % self.WAIT_TURN_INTERVAL != 0:
             return  # wait for armies to build up
 
         # pick unit with largest army
