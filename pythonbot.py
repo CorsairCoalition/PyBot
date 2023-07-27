@@ -1,6 +1,10 @@
+import base64
+import hashlib
 import heapq
+import inspect
 import json
 from ast import literal_eval
+import re
 import redis
 import sys
 
@@ -23,10 +27,149 @@ class OwnedTile(NamedTuple):
     """size of the army on the tile"""
 
 
-@final
-class Map:
+class Move(NamedTuple):
+    """A NamedTuple representing a move on the game board.
+    
+    Args:
+        start (int): the tile to move from
+        end (int): the tile to move to
+        is50 (bool, optional): If true, only half of the army will be moved. Defaults to False.
+        interrupt (bool, optional): If True, the server-side movement queue will be cleared. Defaults to False. 
+    """
+    start: int
+    end: int
+    is50: bool = False
+    interrupt: bool = False
 
-    """Manages all map-related data for a bot including terrain, armies, cities, etc.
+    @staticmethod
+    def moves_as_int_list(moves: list['Move']) -> list[int]:
+        path = [m.start for m in moves]
+        path.append(moves[-1].end)
+        return path
+
+    @staticmethod
+    def ints_as_moves(ints: list[int]) -> list['Move']:
+        return [Move(start,end) for start,end in zip(ints,ints[1:])]
+
+
+
+class Algorithms:
+
+    def aStar(map: 'GameInstance', start: int, targets: list[int]) -> list[int]:
+        """Finds a path from the start to the nearest tile in targets using the A* search algorithm. The path is returned as a list of ints.
+
+        Heuristic: This method uses manhattan distance as the heuristic estimator which can be replaced by a custom estimator via the aStar_custom_h() method.
+
+        Args:
+            map (Map): the game's Map object.
+            start (int): index of the start tile
+            target (int): index of the target (destination) tile.
+
+        Returns:
+            list[int]: An ordered list of ints that connect form a contiguous path from the start tile to the nearest end tile
+
+        Note: If no valid path exists, an empty list is returned.
+        """
+
+        if not isinstance(targets, list):
+            targets = [targets]
+
+        TILE_COST = 1
+
+        search_list: list[Algorithms.__aStarNode__] = []
+
+        for i in range(map.size):
+            search_list.append(Algorithms.__aStarNode__(i))
+
+        open_heap: list[Algorithms.__aStarNode__] = []
+        heapq.heappush(open_heap,search_list[start])
+
+        while open_heap:
+            cur_node = heapq.heappop(open_heap)
+
+            if cur_node.tile in targets:
+                #build path from end to start, then reverse it    
+                
+                path = [cur_node.tile]
+                while cur_node.parent is not None:
+                    path.append(cur_node.parent.tile)
+                    cur_node = cur_node.parent
+
+                return path[::-1] #reversed
+
+            cur_node.closed = True
+
+            adj_tiles = map.get_adjacent_tiles(cur_node.tile)
+
+            for next_tile in adj_tiles:
+
+                neighbour_node = search_list[next_tile]
+                if neighbour_node.closed:
+                    continue
+
+                # g score is the cost from start to the current node
+                gscore = cur_node.g + TILE_COST
+                visisted = neighbour_node.visited
+
+                #if tile is owned by enemy, add extra weight
+                if map.is_enemy(next_tile):
+                    gscore += map.armies[next_tile]
+                elif map.terrain[next_tile] == TERRAIN_TYPES.EMPTY:
+                    gscore += 1
+
+                if not visisted or gscore < neighbour_node.g:
+                    neighbour_node.visited = True
+                    neighbour_node.parent = cur_node
+                    neighbour_node.g = gscore
+                    neighbour_node.h = neighbour_node.h if neighbour_node.h > 0 else Algorithms.__aStar_get_nearest_endpoint_h__(map, start, targets)
+                    neighbour_node.f = neighbour_node.g + neighbour_node.h
+                    neighbour_node.armies = map.armies[next_tile]
+
+                    if not visisted:
+                        heapq.heappush(open_heap,neighbour_node)
+                    else:
+                        #already seen node, need to update heap for correct sorting
+                        heapq.heapify(open_heap)
+        return []
+    class __aStarNode__():
+        tile:int
+        g:int
+        h:int
+        f:int
+        armies:int
+        visited:bool
+        closed: bool
+        parent: 'Algorithms.__aStarNode__'
+
+        def __init__(self,tile:int,g=0,h=0,f=0,armies=0,visited=False,closed=False,parent=None) -> None:
+            self.tile = tile
+            self.g = g
+            self.h = h
+            self.f = f
+            self.armies = armies
+            self.visited = visited
+            self.closed = closed
+            self.parent = parent
+
+        def __lt__(self, value:'Algorithms.__aStarNode__'):
+            return self.armies < value.armies if self.f == value.f else self.f < value.f
+            
+    def __aStar_get_nearest_endpoint_h__(map:'GameInstance', start:int, ends:list[int]) -> int:
+            min = float('inf')
+
+            for end in ends:
+                dist = map.manhattan_distance(start,end)
+                if dist < min:
+                    min = dist
+
+            return min    
+
+
+
+@final
+class GameInstance:
+    """Created whenever a game starts. Contains all the information about the game that is available to the bot.
+    Manages all map-related data for a bot including terrain, armies, cities, etc.
 
     Map objects are updated for each bot before each turn automatically by the framework
     whenever a turn message is received from the server. The map object is accessible
@@ -50,7 +193,23 @@ class Map:
 
     Usage:
         For a given tile T, if the tile is owned by player  with playerIndex P, then terrain[T]==P, and armies[T] is the army strength S on tile T. If P is your own bot, then there's an item [tile,S] in own_tiles; otherwise, [tile,S] is an item in enemy_tiles.
+
+    Args:
+        game_start_message (dict): The game_start message from the redis channel.
     """
+
+    player_index: int
+    """The player index for this bot. All tiles owned by a player are assigned the player_index in the terrain array"""
+    player_colors: list[int]
+    """Array indicating the color for each player, sorted by player_index. The available colors are:
+    [Red, RoyalBlue, Green, Teal, Orange, Magenta, Purple, Maroon, Brass, Golden Brown, Blue, DarkSlateBlue]"""
+    replay_id: str
+    chat_room: str
+    usernames: list[str]
+    teams: list[int]
+    game_type: str
+    options: dict
+    tick: int
 
     size: int
     """The total number of tiles on the map."""
@@ -81,7 +240,7 @@ class Map:
     # swamps:list[any] # unused
     # lights:list[any] # unused
 
-    def __init__(self, game_state_data: dict) -> None:
+    def update_map_data(self, game_state_data: dict) -> None:
         self.height = game_state_data['height']
         self.width = game_state_data['width']
         self.size = game_state_data['size']
@@ -171,163 +330,6 @@ class Map:
         print('Map.remaining_armies_after_attack: received a start/end value that was off the map!',sys.stderr)
         return 0
 
-
-class Move(NamedTuple):
-    """A NamedTuple representing a move on the game board.
-    
-    Args:
-        start (int): the tile to move from
-        end (int): the tile to move to
-        is50 (bool, optional): If true, only half of the army will be moved. Defaults to False.
-        interrupt (bool, optional): If True, the server-side movement queue will be cleared. Defaults to False. 
-    """
-    start: int
-    end: int
-    is50: bool = False
-    interrupt: bool = False
-
-    @staticmethod
-    def moves_as_int_list(moves: list['Move']) -> list[int]:
-        path = [m.start for m in moves]
-        path.append(moves[-1].end)
-        return path
-
-    @staticmethod
-    def ints_as_moves(ints: list[int]) -> list['Move']:
-        return [Move(start,end) for start,end in zip(ints,ints[1:])]
-
-
-
-class Algorithms:
-
-    def aStar(map: Map, start: int, targets: list[int]) -> list[int]:
-        """Finds a path from the start to the nearest tile in targets using the A* search algorithm. The path is returned as a list of ints.
-
-        Heuristic: This method uses manhattan distance as the heuristic estimator which can be replaced by a custom estimator via the aStar_custom_h() method.
-
-        Args:
-            map (Map): the game's Map object.
-            start (int): index of the start tile
-            target (int): index of the target (destination) tile.
-
-        Returns:
-            list[int]: An ordered list of ints that connect form a contiguous path from the start tile to the nearest end tile
-
-        Note: If no valid path exists, an empty list is returned.
-        """
-
-        TILE_COST = 1
-
-        search_list: list[Algorithms.__aStarNode__] = []
-
-        for i in range(map.size):
-            search_list.append(Algorithms.__aStarNode__(i))
-
-        open_heap: list[Algorithms.__aStarNode__] = []
-        heapq.heappush(open_heap,search_list[start])
-
-        while open_heap:
-            cur_node = heapq.heappop(open_heap)
-
-            if cur_node.tile in targets:
-                #build path from end to start, then reverse it    
-                
-                path = [cur_node.tile]
-                while cur_node.parent is not None:
-                    path.append(cur_node.parent.tile)
-                    cur_node = cur_node.parent
-
-                return path[::-1] #reversed
-
-            cur_node.closed = True
-
-            adj_tiles = map.get_adjacent_tiles(cur_node.tile)
-
-            for next_tile in adj_tiles:
-
-                neighbour_node = search_list[next_tile]
-                if neighbour_node.closed:
-                    continue
-
-                # g score is the cost from start to the current node
-                gscore = cur_node.g + TILE_COST
-                visisted = neighbour_node.visited
-
-                #if tile is owned by enemy, add extra weight
-                if map.is_enemy(next_tile):
-                    gscore += map.armies[next_tile]
-                elif map.terrain[next_tile] == TERRAIN_TYPES.EMPTY:
-                    gscore += 1
-
-                if not visisted or gscore < neighbour_node.g:
-                    neighbour_node.visited = True
-                    neighbour_node.parent = cur_node
-                    neighbour_node.g = gscore
-                    neighbour_node.h = neighbour_node.h if neighbour_node.h > 0 else Algorithms.__aStar_get_nearest_endpoint_h__(map, start, targets)
-                    neighbour_node.f = neighbour_node.g + neighbour_node.h
-                    neighbour_node.armies = map.armies[next_tile]
-
-                    if not visisted:
-                        heapq.heappush(open_heap,neighbour_node)
-                    else:
-                        #already seen node, need to update heap for correct sorting
-                        heapq.heapify(open_heap)
-        return []
-    class __aStarNode__():
-        tile:int
-        g:int
-        h:int
-        f:int
-        armies:int
-        visited:bool
-        closed: bool
-        parent: 'Algorithms.__aStarNode__'
-
-        def __init__(self,tile:int,g=0,h=0,f=0,armies=0,visited=False,closed=False,parent=None) -> None:
-            self.tile = tile
-            self.g = g
-            self.h = h
-            self.f = f
-            self.armies = armies
-            self.visited = visited
-            self.closed = closed
-            self.parent = parent
-
-        def __lt__(self, value:'Algorithms.__aStarNode__'):
-            return self.armies < value.armies if self.f == value.f else self.f < value.f
-            
-    def __aStar_get_nearest_endpoint_h__(map:Map, start:int, ends:list[int]) -> int:
-            min = float('inf')
-
-            for end in ends:
-                dist = map.manhattan_distance(start,end)
-                if dist < min:
-                    min = dist
-
-            return min    
-
-
-
-@final
-class GameInstance:
-    """Created whenever a game starts. Contains all the information about the game that is available to the bot.
-    Access the map with game.map, and the current turn with game.turn.
-
-    Args:
-        game_start_message (dict): The game_start message from the redis channel.
-    """
-
-    player_index: int
-    player_colors: list[int]
-    replay_id: str
-    chat_room: str
-    usernames: list[str]
-    teams: list[int]
-    game_type: str
-    options: dict
-    tick: int
-    map: Map
-
     def __init__(self, game_start_message: dict) -> None:
         game_start_message = literal_eval(
             game_start_message.decode())['game_start']
@@ -345,7 +347,7 @@ class GameInstance:
         Updates the game instance with the given game state data.
         """
         self.tick = game_state_data['turn']
-        self.map = Map(game_state_data)
+        self.map = self.update_map_data(game_state_data)
 
 
 @final
@@ -403,7 +405,13 @@ class PythonBot(metaclass=ABCMeta):
     last_attacked_tile:int = -1
     queued_moves:int = 0
 
-    def __init__(self, bot_id: str) -> None:
+    def __init__(self, game_config: dict[str,any]) -> None:
+        bot_prefix = game_config['BOT_ID_PREFIX']
+        
+        #hash userID to prevent it from entering a shared Redis database
+        bot_id = self.__hash_user_id__(game_config['userId'])
+
+        bot_id = bot_prefix + '-' + bot_id
         self.bot_id = bot_id
         self.channel_list = RedisChannelList(self.bot_id)
 
@@ -436,7 +444,7 @@ class PythonBot(metaclass=ABCMeta):
             self.channel_list.ACTION, Action.serialize(start, end, is50, interrupt))
 
     @final
-    def __handle_turn_channel_message__(self, gameState: GameInstance) -> None:
+    def __handle_turn_channel_message__(self, turn_message: str) -> None:
         self.__update_state__()
         self.queued_moves = max(0,self.queued_moves -1)
         self.do_turn()
@@ -448,6 +456,11 @@ class PythonBot(metaclass=ABCMeta):
         game_state_data_dict = dict({k.decode(): json.loads(
             v.decode()) for k, v in update_data.items()})
         self.game.update(game_state_data_dict)
+    
+    @final
+    def __handle_state_channel_message__(self, message: dict) -> None:
+        if self.__is_game_start_message__(message):
+            self.game = GameInstance(message['data'])
 
     @final
     def __is_game_start_message__(self, message: dict) -> bool:
@@ -455,6 +468,14 @@ class PythonBot(metaclass=ABCMeta):
             data = json.loads(message['data'].decode())
             return 'game_start' in data.keys()
         return False
+
+    @final
+    def __hash_user_id__(self, user_id:str):
+        hash_object = hashlib.sha256(user_id.encode())
+        base64_encoded = base64.b64encode(hash_object.digest())
+        cleaned_string = re.sub(r'[^\w\s]', '', base64_encoded.decode())
+        return cleaned_string[-7:]
+
 
     @final
     def __register_redis__(self, r_conn: redis.Redis, pubsub: redis.client.PubSub):
@@ -470,10 +491,7 @@ class PythonBot(metaclass=ABCMeta):
                 exit()
             print(f"Successfully subscribed to {channel} for: {self.bot_id}")
 
-    @final
-    def __handle_state_channel_message__(self, message: dict) -> None:
-        if self.__is_game_start_message__(message):
-            self.game = GameInstance(message['data'])
+   
 
 
 @final
@@ -489,6 +507,8 @@ class RedisConnectionManager:
     """
 
     def __init__(self, redis_config: dict) -> None:
+        redis_config = self.__fix_config_keys__(redis_config)
+        
         # Connect to Redis
         self.__redis_connection__ = redis.Redis(
             **(redis_config), client_name="Python_RedisConnectionManager")
@@ -543,3 +563,24 @@ class RedisConnectionManager:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.__redis_connection__.close()
+
+    def __fix_config_keys__(self, redis_config:dict[str,any]) -> dict:
+        # make all keys lowercase
+        redis_config = {k.lower() : v for k, v in redis_config.items()}
+        
+        # TLS must be renamed to SSL
+        if "tls" in redis_config.keys():
+            redis_config["ssl"] = redis_config["tls"]
+            del redis_config["tls"]
+
+        # remove all keys not accepted by the Redis Python API
+        valid_redis_params = self.__get_valid_redis_params__()
+        unwanted_keys = set(redis_config) - set(valid_redis_params)
+        for unwanted_key in unwanted_keys: del redis_config[unwanted_key]
+
+        return redis_config
+    
+    def __get_valid_redis_params__(self):
+        parameters = inspect.signature(redis.Redis.__init__).parameters
+        parameters = {key: value for key, value in parameters.items() if key not in ['self', 'args', 'kwargs']}
+        return parameters
