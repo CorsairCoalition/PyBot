@@ -217,8 +217,6 @@ class GameInstance:
     """The height of the map."""
     width: int
     """The width of the map."""
-    player_index: int
-    """The bot's player index."""
 
     enemy_general: int
     """The tile index of the enemy general."""

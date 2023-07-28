@@ -5,7 +5,7 @@ import random
 class PathFinderBot(PythonBot):
     """This bot demonstates how to use the aStar pathfinding algorithm to obtain a sequence of moves along a path"""
 
-    WAIT_TURN_INTERVAL: int = 12
+    WAIT_TICK_INTERVAL: int = 12
 
     def __init__(self, game_config: dict) -> None:
         super().__init__(game_config)
@@ -16,7 +16,7 @@ class PathFinderBot(PythonBot):
         if self.queued_moves > 0:
             return # wait for queued moves to execute
 
-        if self.game.tick % self.WAIT_TURN_INTERVAL != 0:
+        if self.game.tick % self.WAIT_TICK_INTERVAL != 0:
             return  # wait for armies to build up
 
         # pick unit with largest army
