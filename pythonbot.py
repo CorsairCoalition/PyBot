@@ -12,7 +12,117 @@ from abc import ABCMeta, abstractmethod
 from typing import NamedTuple, final
 
 
+class PythonBot(metaclass=ABCMeta):
+    """An abstract base class for Python bots. Subclass this to create a bot. 
+
+    Subclasses must implement the do_turn() method.
+
+    Raises:
+        NotImplementedError: if the do_turn() method is not implemented
+
+    Args:
+        bot_id: a unique identifier for the bot. Must be unique across all bots.
+    """
+
+    DEBUG: bool = False
+    game: 'GameInstance'
+    redis_connetion: redis.Redis
+    pubsub: redis.client.PubSub
+    bot_id: str
+    channel_list: '__RedisChannelList__'
+    last_attacked_tile:int = -1
+    queued_moves:int = 0
+
+    def __init__(self, game_config: dict[str,any]) -> None:
+        bot_prefix = game_config['BOT_ID_PREFIX']
+        
+        #hash userID to prevent it from entering a shared Redis database
+        bot_id = self.__hash_user_id__(game_config['userId'])
+
+        bot_id = bot_prefix + '-' + bot_id
+        self.bot_id = bot_id
+        self.channel_list = __RedisChannelList__(self.bot_id)
+
+    @abstractmethod
+    def do_turn():
+        """Called every turn. Must be implemented by the bot subclass."""
+        raise NotImplementedError(
+            "do_turn() must be implemented by the bot subclass.")
+
+    @final
+    def move(self, start: int, end: int, is50: bool = False, interrupt=False, caller:str='') -> None:
+        """
+        Moves armies from one tile to another.
+
+        Args:
+            start (int): the tile to move from
+            end (int): the tile to move to
+            is50 (bool, optional): If true, only half of the army will be moved. Defaults to False.
+            interrupt (bool, optional): If True, the server-side movement queue will be cleared. Defaults to False.
+        """
+        
+        if self.DEBUG and caller != '':
+            print(f'Move called by {caller}. tick: {self.game.tick} Start={start} End={end}') 
+
+        self.last_attacked_tile = end
+
+        self.queued_moves += 1
+
+        self.redis_connetion.publish(
+            self.channel_list.ACTION, __Action__.__serialize__(start, end, is50, interrupt))
+
+    @final
+    def __handle_turn_channel_message__(self, turn_message: str) -> None:
+        self.__update_state__()
+        self.queued_moves = max(0,self.queued_moves -1)
+        self.do_turn()
+
+    @final
+    def __update_state__(self):
+        update_data = self.redis_connetion.hgetall(
+            f'{self.bot_id}-{self.game.replay_id}')
+        game_state_data_dict = dict({k.decode(): json.loads(
+            v.decode()) for k, v in update_data.items()})
+        self.game.update(game_state_data_dict)
+    
+    @final
+    def __handle_state_channel_message__(self, message: dict) -> None:
+        if self.__is_game_start_message__(message):
+            self.game = GameInstance(message['data'])
+
+    @final
+    def __is_game_start_message__(self, message: dict) -> bool:
+        if message['channel'].decode() == self.channel_list.STATE:
+            data = json.loads(message['data'].decode())
+            return 'game_start' in data.keys()
+        return False
+
+    @final
+    def __hash_user_id__(self, user_id:str):
+        hash_object = hashlib.sha256(user_id.encode())
+        base64_encoded = base64.b64encode(hash_object.digest())
+        cleaned_string = re.sub(r'[^\w\s]', '', base64_encoded.decode())
+        return cleaned_string[-7:]
+
+
+    @final
+    def __register_redis__(self, r_conn: redis.Redis, pubsub: redis.client.PubSub):
+        self.redis_connetion = r_conn
+
+        for channel in [self.channel_list.TURN, self.channel_list.STATE]:
+            pubsub.subscribe(channel)
+
+            # First message should always be a subscription confirmation
+            if pubsub.get_message(timeout=None) is None:
+                print(
+                    f"Failed to subscribe to {channel} channel. Terminating.", file=sys.stderr)
+                exit()
+            print(f"Successfully subscribed to {channel} for: {self.bot_id}")
+
+
+
 class TERRAIN_TYPES:
+    """Server-defined terrain types"""
     EMPTY: int = -1
     MOUNTAIN: int = -2
     FOG: int = -3
@@ -21,6 +131,7 @@ class TERRAIN_TYPES:
 
 
 class OwnedTile(NamedTuple):
+    """A tile owned by either the current player or an enemy"""
     tile: int
     """index of the tile"""
     strength: int
@@ -28,27 +139,31 @@ class OwnedTile(NamedTuple):
 
 
 class Move(NamedTuple):
-    """A NamedTuple representing a move on the game board.
-    
-    Args:
-        start (int): the tile to move from
-        end (int): the tile to move to
-        is50 (bool, optional): If true, only half of the army will be moved. Defaults to False.
-        interrupt (bool, optional): If True, the server-side movement queue will be cleared. Defaults to False. 
-    """
+    """A NamedTuple representing a move on the game board."""
     start: int
+    """the tile to move from"""
     end: int
+    """the tile to move to"""
     is50: bool = False
+    """If true, only half of the army will be moved. Defaults to False."""
     interrupt: bool = False
+    """If True, the server-side movement queue will be cleared. Defaults to False."""
 
     @staticmethod
     def moves_as_int_list(moves: list['Move']) -> list[int]:
+        """Converts a list of moves to a list of integers where each int represents a step along the sequence of moves.
+        This is helpful when a sequence of moves represent a path.
+        Note: this assumes the moves are contiguous.
+        """
         path = [m.start for m in moves]
         path.append(moves[-1].end)
         return path
 
     @staticmethod
     def ints_as_moves(ints: list[int]) -> list['Move']:
+        """Converts a contiguous sequence of tiles into a sequence of Moves. 
+        
+        Note: Assumes the tiles list represents a valid move sequence; this can fail if adjacent ints in the list are not adjacent on the game board."""
         return [Move(start,end) for start,end in zip(ints,ints[1:])]
 
 
@@ -204,20 +319,25 @@ class GameInstance:
     """Array indicating the color for each player, sorted by player_index. The available colors are:
     [Red, RoyalBlue, Green, Teal, Orange, Magenta, Purple, Maroon, Brass, Golden Brown, Blue, DarkSlateBlue]"""
     replay_id: str
+    """Replay ID stored on the GIO server. Replays can be viewed by visiting https://bot.generals.io/replays/<replay_id>"""
     chat_room: str
+    """The chat room to which chat messages *could* be broadcast. (Note: chat messages are not currently supported.)"""
     usernames: list[str]
+    """usernames associated with the player(s)/bot(s) account(s) in the current game lobby"""
     teams: list[int]
+    """the team id for each player. (Note: Free-for-all is currently the only supported game mode)"""
     game_type: str
+    """The server-defined game type as a string (e.g., "Free-for-All")"""
     options: dict
+    """Additional game options (e.g., game speed)"""
     tick: int
-
+    """the current game tick. Note: at 1x speed, 2 ticks occur every 1 second."""
     size: int
     """The total number of tiles on the map."""
     height: int
     """The height of the map."""
     width: int
     """The width of the map."""
-
     enemy_general: int
     """The tile index of the enemy general."""
     own_general: int
@@ -297,12 +417,13 @@ class GameInstance:
         return adjacent_tiles
 
     def manhattan_distance(self, start: int, end: int) -> int:
+        """computes teh manhattan distance between two tiles ingoring impassable terrain"""
         start_coord = self.as_coordinates(start)
         end_coord = self.as_coordinates(end)
         return abs(start_coord[0]-end_coord[0])+abs(start_coord[1]-end_coord[1])
 
     def is_valid_move(self, start: int, target: int) -> bool:
-        """checks that the move is at most 1 tile away and the tile is passable"""
+        """Checks that the move is at most 1 tile away and the start and end tiles are passable"""
         all([
             self.manhattan_distance(start, target) == 1,
             self.is_passable(start),
@@ -321,9 +442,13 @@ class GameInstance:
         """Returns the tile at the given coordinates."""
         return coordinates[0] + coordinates[1] * self.width
     
-    def remaining_armies_after_attack(self, start: int, end: int) -> int:
-        if start > 0 and start < self.size and end > 0 and end < self.size:
-            return self.armies[start] - 1 - self.armies[end]
+    def remaining_armies_after_attack(self, attacker: int, defender: int) -> int:
+        """Determines the number of armies which would survive an attack from the start tile to the target tile.
+        
+        Note: this calculation can be applied to non-adjacent tiles (e.g., to determine if the attacker strength is sufficient to take the defender's tile before ever making a move)"""
+        
+        if attacker > 0 and attacker < self.size and defender > 0 and defender < self.size:
+            return self.armies[attacker] - 1 - self.armies[defender]
         
         print('Map.remaining_armies_after_attack: received a start/end value that was off the map!',sys.stderr)
         return 0
@@ -341,17 +466,15 @@ class GameInstance:
         self.options = game_start_message['options']
 
     def update(self, game_state_data: dict) -> None:
-        """
-        Updates the game instance with the given game state data.
-        """
+        """Updates the game instance with the given game state data."""
         self.tick = game_state_data['turn']
         self.map = self.update_map_data(game_state_data)
 
 
 @final
-class Action:
+class __Action__:
     @classmethod
-    def serialize(cls, start: int, end: int, is50: bool = False, interrupt: bool = False):
+    def __serialize__(cls, start: int, end: int, is50: bool = False, interrupt: bool = False):
         """Serializes a move for the game engine.
 
         Args:
@@ -367,129 +490,23 @@ class Action:
 
 
 @final
-class RedisChannelList:
+class __RedisChannelList__:
     """A data class to hold the redis channel names for a bot
     """
-    TURN: str
+    TURN: str 
+    """Receives a single message each game tick"""
     ACTION: str
+    """CommanderCortex will receive bot movement commands in this channel"""
     RECOMMENDATION: str
+    """Can be used to send recommendations to CommanderCortex, if desired"""
     STATE: str
+    """Game start/end messages are broadcast to this channel"""
 
     def __init__(self, bot_id: str):
         self.TURN = f"{bot_id}-turn"
         self.ACTION = f"{bot_id}-action"
         self.RECOMMENDATION = f"{bot_id}-recommendation"
         self.STATE = f"{bot_id}-state"
-
-
-class PythonBot(metaclass=ABCMeta):
-    """An abstract base class for Python bots. Subclass this to create a bot. 
-
-    Subclasses must implement the do_turn() method.
-
-    Raises:
-        NotImplementedError: if the do_turn() method is not implemented
-
-    Args:
-        bot_id: a unique identifier for the bot. Must be unique across all bots.
-    """
-
-    DEBUG: bool = False
-    game: GameInstance
-    redis_connetion: redis.Redis
-    pubsub: redis.client.PubSub
-    bot_id: str
-    channel_list: RedisChannelList
-    last_attacked_tile:int = -1
-    queued_moves:int = 0
-
-    def __init__(self, game_config: dict[str,any]) -> None:
-        bot_prefix = game_config['BOT_ID_PREFIX']
-        
-        #hash userID to prevent it from entering a shared Redis database
-        bot_id = self.__hash_user_id__(game_config['userId'])
-
-        bot_id = bot_prefix + '-' + bot_id
-        self.bot_id = bot_id
-        self.channel_list = RedisChannelList(self.bot_id)
-
-    @abstractmethod
-    def do_turn():
-        """Called every turn. Must be implemented by the bot subclass."""
-        raise NotImplementedError(
-            "do_turn() must be implemented by the bot subclass.")
-
-    @final
-    def move(self, start: int, end: int, is50: bool = False, interrupt=False, caller:str='') -> None:
-        """
-        Moves armies from one tile to another.
-
-        Args:
-            start (int): the tile to move from
-            end (int): the tile to move to
-            is50 (bool, optional): If true, only half of the army will be moved. Defaults to False.
-            interrupt (bool, optional): If True, the server-side movement queue will be cleared. Defaults to False.
-        """
-        
-        if self.DEBUG and caller != '':
-            print(f'Move called by {caller}. tick: {self.game.tick} Start={start} End={end}') 
-
-        self.last_attacked_tile = end
-
-        self.queued_moves += 1
-
-        self.redis_connetion.publish(
-            self.channel_list.ACTION, Action.serialize(start, end, is50, interrupt))
-
-    @final
-    def __handle_turn_channel_message__(self, turn_message: str) -> None:
-        self.__update_state__()
-        self.queued_moves = max(0,self.queued_moves -1)
-        self.do_turn()
-
-    @final
-    def __update_state__(self):
-        update_data = self.redis_connetion.hgetall(
-            f'{self.bot_id}-{self.game.replay_id}')
-        game_state_data_dict = dict({k.decode(): json.loads(
-            v.decode()) for k, v in update_data.items()})
-        self.game.update(game_state_data_dict)
-    
-    @final
-    def __handle_state_channel_message__(self, message: dict) -> None:
-        if self.__is_game_start_message__(message):
-            self.game = GameInstance(message['data'])
-
-    @final
-    def __is_game_start_message__(self, message: dict) -> bool:
-        if message['channel'].decode() == self.channel_list.STATE:
-            data = json.loads(message['data'].decode())
-            return 'game_start' in data.keys()
-        return False
-
-    @final
-    def __hash_user_id__(self, user_id:str):
-        hash_object = hashlib.sha256(user_id.encode())
-        base64_encoded = base64.b64encode(hash_object.digest())
-        cleaned_string = re.sub(r'[^\w\s]', '', base64_encoded.decode())
-        return cleaned_string[-7:]
-
-
-    @final
-    def __register_redis__(self, r_conn: redis.Redis, pubsub: redis.client.PubSub):
-        self.redis_connetion = r_conn
-
-        for channel in [self.channel_list.TURN, self.channel_list.STATE]:
-            pubsub.subscribe(channel)
-
-            # First message should always be a subscription confirmation
-            if pubsub.get_message(timeout=None) is None:
-                print(
-                    f"Failed to subscribe to {channel} channel. Terminating.", file=sys.stderr)
-                exit()
-            print(f"Successfully subscribed to {channel} for: {self.bot_id}")
-
-   
 
 
 @final
