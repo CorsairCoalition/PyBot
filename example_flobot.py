@@ -9,19 +9,6 @@ class Heuristics:
 
     @staticmethod
     def choose_discover_tile(map:GameInstance, passable_tiles):
-
-        def edge_weight_for_index(index:int): #TODO Move this out of choose_discover_tile
-            # Get tile coordinates from index
-            y, x = divmod(index, map.width)
-
-            # Calculate distances to the map edges
-            upper_edge = y
-            right_edge = map.width - 1 - x
-            down_edge = map.height - 1 - y
-            left_edge = x
-
-            # Return calculated edge weight
-            return min(upper_edge, down_edge) * min(left_edge, right_edge)
     
         # Generate a list of tuples containing each tile's index and its distance to the general
         tiles: list[Tile] = [Tile(tile=index, weight=map.manhattan_distance(map.own_general, index)) for index in passable_tiles]
@@ -41,7 +28,7 @@ class Heuristics:
             if general_distance < max_general_distance:
                 return optimal_tile.tile
             # Calculate the tile's edge weight
-            edge_weight = edge_weight_for_index(tile_index)
+            edge_weight = Heuristics.__edge_weight_for_index__(map, tile_index)
             # If the tile's edge weight is greater than the optimal tile's, update the optimal tile
             if edge_weight > optimal_tile.weight:
                 optimal_tile = Tile(tile=tile_index,weight=edge_weight)
@@ -51,6 +38,20 @@ class Heuristics:
             return optimal_tile.tile
         else:
             print("No tile found. Something is going wrong here!")
+
+    @staticmethod
+    def __edge_weight_for_index__(map:GameInstance, index:int):
+            # Get tile coordinates from index
+            y, x = divmod(index, map.width)
+
+            # Calculate distances to the map edges
+            upper_edge = y
+            right_edge = map.width - 1 - x
+            down_edge = map.height - 1 - y
+            left_edge = x
+
+            # Return calculated edge weight
+            return min(upper_edge, down_edge) * min(left_edge, right_edge)
 
     @staticmethod
     def choose_enemy_target_tile_by_lowest_army_fog_adjacent(map:GameInstance) -> Tile | None:
