@@ -72,7 +72,7 @@ class PythonBot(metaclass=ABCMeta):
             self.channel_list.ACTION, __Action__.__serialize__(start, end, is50, interrupt))
 
     @final
-    def queue_moves(self, path: list[int]):
+    def queue_moves(self, path: list[int], caller:str = ''):
         """Queues moves along a path. 
         
         Assumptions: Assumes the order of tiles in the int list specify a valid list of moves on the game board. This method fails gracefully when a move is invalid."""
@@ -83,7 +83,7 @@ class PythonBot(metaclass=ABCMeta):
                 print(f'Attempted to queue invalid move from {start_tile} to {next_tile}!', file=sys.stderr)
                 return
             
-            self.move(start_tile, next_tile)
+            self.move(start_tile, next_tile,caller=caller)
             start_tile = next_tile
 
     @final
