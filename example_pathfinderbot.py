@@ -34,10 +34,7 @@ class PathFinderBot(PythonBot):
         path = aStar(self.game, strongest_owned_tile.tile, target)
 
         # send the moves to the movement queue
-        start_tile = path.pop()
-        for next_tile in path:
-            self.move(start_tile, next_tile)
-            start_tile = next_tile
+        self.queue_moves(path)
 
 
 
