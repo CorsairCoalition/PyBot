@@ -1,5 +1,101 @@
-from pythonbot import PythonBot, Algorithms, Move, GameInstance,TERRAIN_TYPES
+from pythonbot.core import PythonBot, Move, GameInstance,TERRAIN_TYPES
+from pythonbot.algorithms import aStar
 from typing import NamedTuple
+
+class FloBot(PythonBot):
+
+    is_collecting: bool = False
+    collect_area: list[int] = []
+
+    is_infiltrating: bool = False
+    spread_count:int = 0
+
+    def __init__(self, game_config) -> None:
+        super().__init__(game_config)
+        pass
+
+    def do_turn(self) -> None:
+        Strategy.pick_strategy(self)
+
+class Strategy:
+
+    INITIAL_WAIT_TICKS:int = 23
+    REINFORCEMENT_INTERVAL:int = 50
+    SPREADING_TIMES:int = 4
+    ATTACK_TICKS_BEFORE_REINFORCEMENTS:int = 10
+    
+    @staticmethod
+    def pick_strategy(bot: 'FloBot'):
+
+        if bot.game.enemy_general != -1:
+            Strategy.end_game(bot)
+        elif bot.is_infiltrating:
+            Infiltrate.infiltrate(bot)
+        elif Strategy.is_spread_needed(bot):
+            Spread.spread(bot)
+        elif bot.game.tick < Strategy.REINFORCEMENT_INTERVAL:
+            Strategy.early_game(bot, bot.game.tick)
+        else:
+            Strategy.mid_game(bot, bot.game.tick)
+
+    @staticmethod
+    def is_spread_needed(bot:'FloBot'):
+        # spread every 50 ticks, but only a fixed amount of times, unless no enemies are detected
+        is_reinforcement_tick = bot.game.tick % Strategy.REINFORCEMENT_INTERVAL == 0
+        spreads_allowable = bot.game.tick / Strategy.REINFORCEMENT_INTERVAL <= Strategy.SPREADING_TIMES
+        enemy_not_detected = not bot.game.enemy_tiles
+
+        return is_reinforcement_tick and (spreads_allowable or enemy_not_detected)
+    
+    @staticmethod
+    def early_game(bot: 'FloBot', tick: int):
+        if tick < Strategy.INITIAL_WAIT_TICKS + 1:
+            return
+        elif tick == Strategy.INITIAL_WAIT_TICKS + 1:
+            Discover.expand_territory(bot,Strategy.INITIAL_WAIT_TICKS)
+        elif bot.queued_moves == 0:
+            Discover.strategic_relocation(bot,Strategy.INITIAL_WAIT_TICKS)
+
+    @staticmethod
+    def mid_game(bot: 'FloBot', tick: int):
+
+        # Enemy tile was detected and a path was found. Check further if attack should start already
+        # collectArea of 1 means there's no end node to attack anymore
+        if bot.game.enemy_tiles and len(bot.collect_area) > 1 and (tick + Strategy.ATTACK_TICKS_BEFORE_REINFORCEMENTS + len(bot.collect_area) - 1) % Strategy.REINFORCEMENT_INTERVAL == 0:
+            # reinforcements from general along the found path should be there a fixed amount of ticks before new reinforcements come
+            # tick the "attack" should start from general
+            # e.g., path is 7 long, atk_ticks_before_reinforcements are 10. 34+10+7 -1 %50 = 0 (start at tick 34 to arrive at tick 40)
+            
+            if len(bot.collect_area) == 2:
+                # gathered units moved next to enemy tile. start to attack
+                # infilstrating is True until no adj enemies to attack found. Focus moves on them
+                bot.is_infiltrating = True
+            
+            start = bot.collect_area.pop(0)
+            end = bot.collect_area[0]
+            bot.move(start,end,caller='mid_game')
+        elif not bot.is_infiltrating:
+            # bot is not moving to enemy tile and isn't infiltrating => collect
+            bot.collect_area = Collect.get_collect_area(bot)
+            if bot.queued_moves == 0:
+                Collect.collect(bot)
+
+    @staticmethod
+    def end_game(bot: 'FloBot'):
+        if not bot.is_infiltrating:
+            RushGeneral.rush(bot)
+        else:
+            # try_to_kill clears infiltrating flag
+            if not RushGeneral.try_to_kill_general(bot):
+                # finish infiltrating first (enemy can be discovered diagonally. Move to adj tile first)
+                path_to_general = aStar(bot.game,bot.last_attacked_tile,[bot.game.enemy_general])
+
+                if len(path_to_general) < 2 or bot.game.remaining_armies_after_attack(path_to_general[0], path_to_general[1]) <= 1:
+                    bot.is_infiltrating = False
+
+                if len(path_to_general) > 2:
+                    bot.move(path_to_general[0], path_to_general[1])
+
 
 class Tile(NamedTuple):
     tile: int
@@ -211,7 +307,7 @@ class Collect:
         if map.enemy_tiles:
             enemy_target = Heuristics.choose_enemy_target_tile_by_lowest_army_fog_adjacent(map)
             if enemy_target is not None:
-                path_to_enemy = Algorithms.aStar(map, map.own_general, [enemy_target.tile])
+                path_to_enemy = aStar(map, map.own_general, [enemy_target.tile])
                 return path_to_enemy
         
         # not enemy found, gather on own_general
@@ -224,7 +320,7 @@ class Collect:
             # skip collecting, no tiles found
             bot.is_collecting = False
         else:
-            path_to_attacking_path = Algorithms.aStar(bot.game, highest_army_index, bot.collect_area)
+            path_to_attacking_path = aStar(bot.game, highest_army_index, bot.collect_area)
             if len(path_to_attacking_path) > 1:
                 bot.move(highest_army_index, path_to_attacking_path[1], caller='collect')
 
@@ -264,7 +360,7 @@ class Discover:
         moveable_tiles = bot.game.get_moveable_army_tiles()
         if moveable_tiles:
             move = FloAlgorithm.dec_tree_search(bot.game.player_index,bot.game, moveable_tiles, ticks)
-            moves = Algorithms.aStar(bot.game,start=move.start,targets=[move.end])
+            moves = aStar(bot.game,start=move.start,targets=[move.end])
 
             moves = Move.ints_as_moves(moves)
 
@@ -329,7 +425,7 @@ class Infiltrate:
                 tiles_with_fog.append(t)
 
         
-        shortest_path = Algorithms.aStar(bot.game, start, tiles_with_fog)
+        shortest_path = aStar(bot.game, start, tiles_with_fog)
         
         return shortest_path
 
@@ -344,7 +440,7 @@ class RushGeneral:
         if not RushGeneral.try_to_kill_general(bot):
             if RushGeneral.collect_ticks_left > 0:
                 # collect units along the path toward the enemy general
-                moves = Algorithms.aStar(bot.game ,bot.game.own_general,[bot.game.enemy_general])
+                moves = aStar(bot.game ,bot.game.own_general,[bot.game.enemy_general])
                 moves = Move.ints_as_moves(moves)
 
                 bot.collect_area = [move.start for move in moves]
@@ -359,7 +455,7 @@ class RushGeneral:
     
     @staticmethod
     def move_to_general(bot: 'FloBot', start: int):
-        path_from_highest_army_to_general = Algorithms.aStar(bot.game,start,[bot.game.enemy_general])
+        path_from_highest_army_to_general = aStar(bot.game,start,[bot.game.enemy_general])
         path_from_highest_army_to_general = Move.ints_as_moves(path_from_highest_army_to_general)
 
 
@@ -471,115 +567,10 @@ class Spread:
         for n in possible_moves:
             n.moves = [v for v in n.moves if v != chosen_tile]
 
-class Strategy:
-
-    INITIAL_WAIT_TICKS:int = 23
-    REINFORCEMENT_INTERVAL:int = 50
-    SPREADING_TIMES:int = 4
-    ATTACK_TICKS_BEFORE_REINFORCEMENTS:int = 10
-
-    selected_strats = {'early':0, 'mid':0, 'spread':0, 'infil':0,'end':0}
-    
-    @staticmethod
-    def pick_strategy(bot: 'FloBot'):
-
-        if bot.game.enemy_general != -1:
-            Strategy.selected_strats['end'] += 1
-            Strategy.end_game(bot)
-        elif bot.is_infiltrating:
-            Strategy.selected_strats['infil'] += 1
-            Infiltrate.infiltrate(bot)
-        elif Strategy.is_spread_needed(bot):
-            Strategy.selected_strats['spread'] += 1
-            Spread.spread(bot)
-        elif bot.game.tick < Strategy.REINFORCEMENT_INTERVAL:
-            Strategy.selected_strats['early'] += 1
-            Strategy.early_game(bot, bot.game.tick)
-        else:
-            Strategy.selected_strats['mid'] += 1
-            Strategy.mid_game(bot, bot.game.tick)
-
-        print(f'Tick: {bot.game.tick}. Strategies selected: {Strategy.selected_strats}')
-
-    @staticmethod
-    def is_spread_needed(bot:'FloBot'):
-        # spread every 50 ticks, but only a fixed amount of times, unless no enemies are detected
-        is_reinforcement_tick = bot.game.tick % Strategy.REINFORCEMENT_INTERVAL == 0
-        # spreads_allowable = bot.spread_count < Strategy.SPREADING_TIMES
-        spreads_allowable = bot.game.tick / Strategy.REINFORCEMENT_INTERVAL <= Strategy.SPREADING_TIMES
-        enemy_not_detected = not bot.game.enemy_tiles
-
-        return is_reinforcement_tick and (spreads_allowable or enemy_not_detected)
-    
-    @staticmethod
-    def early_game(bot: 'FloBot', tick: int):
-        if tick < Strategy.INITIAL_WAIT_TICKS + 1:
-            return
-        elif tick == Strategy.INITIAL_WAIT_TICKS + 1:
-            Discover.expand_territory(bot,Strategy.INITIAL_WAIT_TICKS)
-        elif bot.queued_moves == 0:
-            Discover.strategic_relocation(bot,Strategy.INITIAL_WAIT_TICKS)
-
-    @staticmethod
-    def mid_game(bot: 'FloBot', tick: int):
-
-        # Enemy tile was detected and a path was found. Check further if attack should start already
-        # collectArea of 1 means there's no end node to attack anymore
-        if bot.game.enemy_tiles and len(bot.collect_area) > 1 and (tick + Strategy.ATTACK_TICKS_BEFORE_REINFORCEMENTS + len(bot.collect_area) - 1) % Strategy.REINFORCEMENT_INTERVAL == 0:
-            # reinforcements from general along the found path should be there a fixed amount of ticks before new reinforcements come
-            # tick the "attack" should start from general
-            # e.g., path is 7 long, atk_ticks_before_reinforcements are 10. 34+10+7 -1 %50 = 0 (start at tick 34 to arrive at tick 40)
-            
-            if len(bot.collect_area) == 2:
-                # gathered units moved next to enemy tile. start to attack
-                # infilstrating is True until no adj enemies to attack found. Focus moves on them
-                bot.is_infiltrating = True
-            
-            start = bot.collect_area.pop(0)
-            end = bot.collect_area[0]
-            bot.move(start,end,caller='mid_game')
-        elif not bot.is_infiltrating:
-            # bot is not moving to enemy tile and isn't infiltrating => collect
-            bot.collect_area = Collect.get_collect_area(bot)
-            if bot.queued_moves == 0:
-                Collect.collect(bot)
-
-    @staticmethod
-    def end_game(bot: 'FloBot'):
-        if not bot.is_infiltrating:
-            RushGeneral.rush(bot)
-        else:
-            # try_to_kill clears infiltrating flag
-            if not RushGeneral.try_to_kill_general(bot):
-                # finish infiltrating first (enemy can be discovered diagonally. Move to adj tile first)
-                path_to_general = Algorithms.aStar(bot.game,bot.last_attacked_tile,[bot.game.enemy_general])
-
-                if len(path_to_general) < 2 or bot.game.remaining_armies_after_attack(path_to_general[0], path_to_general[1]) <= 1:
-                    bot.is_infiltrating = False
-
-                if len(path_to_general) > 2:
-                    bot.move(path_to_general[0], path_to_general[1])
-        
-
-class FloBot(PythonBot):
-
-    is_collecting: bool = False
-    collect_area: list[int] = []
-
-    is_infiltrating: bool = False
-    spread_count:int = 0
-
-    def __init__(self, game_config) -> None:
-        super().__init__(game_config)
-        pass
-
-    def do_turn(self) -> None:
-        Strategy.pick_strategy(self)
-
 
 if __name__ == "__main__":
 
-    from pythonbot import RedisConnectionManager
+    from pythonbot.core import RedisConnectionManager
     import os
     import json
     uppath = lambda _path, n: os.sep.join(_path.split(os.sep)[:-n])

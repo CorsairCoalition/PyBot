@@ -1,4 +1,4 @@
-from pythonbot import PythonBot
+from pythonbot.core import PythonBot
 import random
 
 
@@ -28,7 +28,7 @@ class RandomBot(PythonBot):
 
 if __name__ == "__main__":
 
-    from pythonbot import RedisConnectionManager
+    from pythonbot.core import RedisConnectionManager
     import os
     import json
     uppath = lambda _path, n: os.sep.join(_path.split(os.sep)[:-n])

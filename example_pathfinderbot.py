@@ -1,4 +1,5 @@
-from pythonbot import PythonBot, Algorithms, Move
+from pythonbot.core import PythonBot
+from pythonbot.algorithms import aStar
 import random
 
 
@@ -20,31 +21,29 @@ class PathFinderBot(PythonBot):
             return  # wait for armies to build up
 
         # pick unit with largest army
-        strongest_owned_tile = max(
-            self.game.own_tiles, key=lambda x: x.strength)
+        strongest_owned_tile = max(self.game.own_tiles, key=lambda x: x.strength)
         if strongest_owned_tile.strength <= 1:
             return  # not big enough to move
 
         # pick a random position on the board
-        target = -1
+        target = -1 # tiles outside the game board are never passable
         while not self.game.is_passable(target):
             target = random.randint(0, self.game.size-1)
 
-        # get the list of tiles along the path
-        path = Algorithms.aStar(self.game, strongest_owned_tile.tile, target)
-
-        # convert the path to a sequence of moves
-        path = Move.ints_as_moves(path)
+        # get a tile path from the start to the target 
+        path = aStar(self.game, strongest_owned_tile.tile, target)
 
         # send the moves to the movement queue
-        for move in path:
-            self.move(move.start, move.end)
+        start_tile = path.pop()
+        for next_tile in path:
+            self.move(start_tile, next_tile)
+            start_tile = next_tile
 
 
 
 if __name__ == "__main__":
 
-    from pythonbot import RedisConnectionManager
+    from pythonbot.core import RedisConnectionManager
     import os
     import json
     uppath = lambda _path, n: os.sep.join(_path.split(os.sep)[:-n])
