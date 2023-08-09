@@ -1,4 +1,4 @@
-from pythonbot.core import GameInstance, TERRAIN_TYPES
+from ggbot.core import GameInstance, TERRAIN_TYPES
 import heapq
 
 def aStar(map: 'GameInstance', start: int, targets: list[int]) -> list[int]:

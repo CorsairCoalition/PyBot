@@ -1,5 +1,5 @@
-from pythonbot.core import PythonBot
-from pythonbot.algorithms import aStar
+from ggbot.core import PythonBot
+from ggbot.algorithms import aStar
 import random
 
 
@@ -43,7 +43,7 @@ class PathFinderBot(PythonBot):
 
 if __name__ == "__main__":
 
-    from pythonbot.core import RedisConnectionManager
+    from ggbot.core import RedisConnectionManager
     import os
     import json
     uppath = lambda _path, n: os.sep.join(_path.split(os.sep)[:-n])
