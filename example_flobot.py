@@ -1,4 +1,5 @@
-from ggbot.core import PythonBot, Move, GameInstance,TERRAIN_TYPES
+from ggbot.core import PythonBot, GameInstance,TERRAIN_TYPES
+import ggbot.utils
 from ggbot.algorithms import aStar
 from typing import NamedTuple
 
@@ -9,10 +10,6 @@ class FloBot(PythonBot):
 
     is_infiltrating: bool = False
     spread_count:int = 0
-
-    def __init__(self, game_config) -> None:
-        super().__init__(game_config)
-        pass
 
     def do_turn(self) -> None:
         Strategy.pick_strategy(self)
@@ -27,8 +24,8 @@ class Strategy:
     @staticmethod
     def pick_strategy(bot: 'FloBot'):
 
-        if bot.game.enemy_general != -1:
-            Strategy.end_game(bot)
+        if bot.game.enemy_general != -1: # enemy general is visible!
+            Strategy.end_game(bot) 
         elif bot.is_infiltrating:
             Infiltrate.infiltrate(bot)
         elif Strategy.is_spread_needed(bot):
@@ -49,12 +46,12 @@ class Strategy:
     
     @staticmethod
     def early_game(bot: 'FloBot', tick: int):
-        if tick < Strategy.INITIAL_WAIT_TICKS + 1:
+        if tick <= Strategy.INITIAL_WAIT_TICKS:
             return
         elif tick == Strategy.INITIAL_WAIT_TICKS + 1:
-            Discover.expand_territory(bot,Strategy.INITIAL_WAIT_TICKS)
+            Discover.first_discover_branch(bot, Strategy.INITIAL_WAIT_TICKS)
         elif bot.queued_moves == 0:
-            Discover.strategic_relocation(bot,Strategy.INITIAL_WAIT_TICKS)
+            Discover.second_dicover_branch(bot, Strategy.INITIAL_WAIT_TICKS)
 
     @staticmethod
     def mid_game(bot: 'FloBot', tick: int):
@@ -94,8 +91,7 @@ class Strategy:
                     bot.is_infiltrating = False
 
                 if len(path_to_general) > 2:
-                    bot.move(path_to_general[0], path_to_general[1])
-
+                    bot.move(path_to_general[0], path_to_general[1], caller='end_game')
 
 class Tile(NamedTuple):
     tile: int
@@ -104,36 +100,32 @@ class Tile(NamedTuple):
 class Heuristics:
 
     @staticmethod
-    def choose_discover_tile(map:GameInstance, passable_tiles):
-    
-        # Generate a list of tuples containing each tile's index and its distance to the general
-        tiles: list[Tile] = [Tile(tile=index, weight=map.manhattan_distance(map.own_general, index)) for index in passable_tiles]
-        
-        # Sort the tiles by their distance to the general in descending order
-        tiles.sort(key=lambda x: x.weight, reverse=True)
-        
-        # Initialize the optimal tile data
-        optimal_tile:Tile = Tile(-1,-1)
+    def choose_discover_tile(map:GameInstance, tiles:list[tuple[int,int]]):
+        """Returns the furthest possible tile index from the general with maximum distance to edge
+        Passable_tiles is an array of tuples of the form (tile index, distance to start tile)"""
 
-        # Extract the maximum general distance from the first element
-        max_general_distance = tiles[0].weight
+        optimal_tile = (-1,-1) # (index, edge_weight) Careful! This is different from passable_tiles tuple format
 
-        # Iterate over the tiles
-        for tile_index, general_distance in tiles:
-            # If the tile's general distance is less than the maximum, we've passed the optimal tile
-            if general_distance < max_general_distance:
-                return optimal_tile.tile
-            # Calculate the tile's edge weight
-            edge_weight = Heuristics.__edge_weight_for_index__(map, tile_index)
-            # If the tile's edge weight is greater than the optimal tile's, update the optimal tile
-            if edge_weight > optimal_tile.weight:
-                optimal_tile = Tile(tile=tile_index,weight=edge_weight)
+        max_general_distance = tiles[len(tiles) - 1][1]
 
-        # If we've gone through all the tiles and found an optimal tile, return it
-        if optimal_tile.tile != -1:
-            return optimal_tile.tile
+        # first elements are the closest to the general
+        for tile in reversed(tiles): # note reversed order!
+            edge_weight = Heuristics.__edge_weight_for_index__(map, tile[0])
+
+            # general distance is not at maximum anymore. ignore other tiles
+            if tile[1] < max_general_distance:
+                return optimal_tile[0]
+
+            # a tile with maximum general_distance and
+            if edge_weight > optimal_tile[1]:
+                optimal_tile = (tile[0], edge_weight)
+
+        # loop stopped but optimal tile was found(meaning it was only 1 step away from general)
+        if optimal_tile[0] != -1:
+            return optimal_tile[0]
         else:
-            print("No tile found. Something is going wrong here!")
+            print(f'No tile found. Something is going wrong at choose_discover_tile!')
+
 
     @staticmethod
     def __edge_weight_for_index__(map:GameInstance, index:int):
@@ -150,7 +142,7 @@ class Heuristics:
             return min(upper_edge, down_edge) * min(left_edge, right_edge)
 
     @staticmethod
-    def choose_enemy_target_tile_by_lowest_army_fog_adjacent(map:GameInstance) -> Tile | None:
+    def choose_enemy_target_tile_by_lowest_army_fog_adjacent(map:GameInstance) -> tuple[int,int] | None:
         """From among the visible, fog-adjacent enemy tiles, selects the weakest
 
         Args:
@@ -159,18 +151,18 @@ class Heuristics:
         Returns:
             int: the enemy tile with the weakest army. Returns None if no fog-adjacent enemy tiles are visible.
         """
-        tiles_with_fog: list[Tile] = []
+        tiles_with_fog: list[tuple[int,int]] = []
 
         # loop through all visible enemy tiles 
         for key, value in map.enemy_tiles:
             if Heuristics.is_adjacent_to_fog(map, key):
-                tiles_with_fog.append(Tile(key,value))
+                tiles_with_fog.append((key,value))
 
         if len(tiles_with_fog) == 0:
             return None
 
         # return tile with lowest army value
-        return min(tiles_with_fog, key=lambda t: t.weight)
+        return min(tiles_with_fog, key=lambda t: t[1])
 
     @staticmethod
     def calc_capture_weight(player_index:int, terrain_value:int):
@@ -191,66 +183,88 @@ class Heuristics:
             if not map.discovered_tiles[next_tile]:
                 return True
         return False
-    
-        # return any([map.terrain[t] == TERRAIN_TYPES.FOG for t in map.get_adjacent_tiles(tile)])
 
-import heapq
 from functools import reduce
 class FloAlgorithm:
 
-    def bfs(bot:PythonBot,start_tile:int,radius:int):
-        visited = set([start_tile])  # Keep track of visited tiles
-        queue = [(start_tile, 0)]  # Use a queue to perform BFS, store tile with its hop count
-        tiles_within_k_steps = []
+    def bfs(bot:PythonBot, start_tile:int, radius:int) -> list[tuple[int,int]]:
+        """Returns all reachable tiles within a given radius. Return format is a list of tuples, where the first value is the tile index and the second value is the distance from the start tile."""
+        map = bot.game
+        is_visited = [False] * map.size
+        is_visited[start_tile] = True
+
+        queue = [start_tile]
+        cur_layer = 0
+        cur_layer_tiles = 1
+        next_layer_tiles = 0
+        found_nodes = []
 
         while queue:
-            tile, step_count = queue.pop(0)
+            cur_tile = queue.pop(0)
 
-            if step_count <= radius:
-                tiles_within_k_steps.append(tile)
+            # don't add starting node
+            if cur_layer != 0:
+                found_nodes.append((cur_tile,cur_layer))
+            
+            adj_tiles = map.get_adjacent_tiles(cur_tile)
 
-                if step_count < radius:  # Only get neighbors if current hop count is less than k
-                    for neighbor in bot.game.get_adjacent_tiles(tile):
-                        if neighbor not in visited:
-                            visited.add(neighbor)
-                            queue.append((neighbor, step_count + 1))
-
-        return tiles_within_k_steps
+            for next_tile in adj_tiles:
+                if not is_visited[next_tile]:
+                    # tile can be moved on (ignoring cities)
+                    queue.append(next_tile)
+                    is_visited[next_tile] = True
+                    next_layer_tiles += 1
+            
+            # check if all tiles of current depth are already visited
+            cur_layer_tiles -=1
+            if cur_layer_tiles == 0:
+                cur_layer += 1
+                
+                if cur_layer < radius:
+                    cur_layer_tiles = next_layer_tiles
+                    next_layer_tiles = 0
+        return found_nodes
     
     def dijkstra(bot:PythonBot, start: int, target: int) -> list[int]:
+        """"returns shortest path (as array) between start and end index without considering node weigths"""
         map = bot.game
 
-        # Initialize priority queue with start node
-        queue = [(0, start)]
-        
-        # Initialize distances with infinite values
-        distances = {node: float('infinity') for node in range(map.size)}
-        distances[start] = 0
-        
-        # Initialize parents (for path reconstruction)
-        parents = {node: None for node in range(map.size)}
-        
+        is_visited = [False] * map.size
+        previous = [i for i in range(map.size)]
+
+        previous[start] = -1
+
+        queue = [start]
+
+
         while queue:
-            # Pop the node with smallest distance
-            curr_distance, curr_node = heapq.heappop(queue)
-            
-            # If we reached the target, reconstruct and return the path
-            if curr_node == target:
-                path = []
-                while curr_node is not None:
-                    path.append(curr_node)
-                    curr_node = parents[curr_node]
-                return path[::-1]
-            
-            # If not, update the distances of its neighbors
-            for neighbor in map.get_adjacent_tiles(curr_node):
-                new_distance = curr_distance + 1
-                if new_distance < distances[neighbor]:
-                    distances[neighbor] = new_distance
-                    parents[neighbor] = curr_node
-                    heapq.heappush(queue, (new_distance, neighbor))
-                    
-        return []  # Return an empty list if there's no path
+            cur_tile = queue.pop(0)
+            is_visited[cur_tile] = True
+
+            adj_tiles = map.get_adjacent_tiles(cur_tile)
+
+            for next_tile in adj_tiles:
+                if not is_visited[next_tile] and not cur_tile in queue:
+                    previous[next_tile] = cur_tile
+                    if next_tile == target:
+                        return FloAlgorithm.__construct_dijkstra_path__(start, target, previous)
+                    queue.append(next_tile)
+
+        print(f'Dijkstra found no path! start: {start} end: {target}')
+        return []
+    
+    def __construct_dijkstra_path__(start:int, end:int, previous: list[int]):
+        
+        path = [end]
+        prev_index = previous[end]
+        
+        # start node has -1 as previous
+        while prev_index != -1:
+            # build the path backwards, from end to start
+            path.append(prev_index)
+            prev_index = previous[prev_index]
+
+        return path[::-1] # reverse the path 
     
     def dec_tree_search(player_index:int, map:GameInstance, possible_starting_points:list[int], max_ticks:int):
         """
@@ -265,34 +279,34 @@ class FloAlgorithm:
             max_ticks (int): dfs depth limit
         """
 
-        def dec_tree_search_rec( start:int, ticks:int, weight:int = 0):
+        moves = []
+
+        for start in possible_starting_points:
+            moves.append(FloAlgorithm.dec_tree_search_rec(player_index, map, start, max_ticks))
+
+        best = FloAlgorithm.get_best_move(moves)
+        return best['start'], best['end']
+    
+    def dec_tree_search_rec(player_index:int, map:GameInstance, start:int, ticks:int, weight:int = 0):
             possible_moves = []
 
             if ticks != 0:
                 adj_tiles = map.get_adjacent_tiles(start)
                 for next_tile in adj_tiles:
                     next_weight = Heuristics.calc_capture_weight(player_index,map.terrain[next_tile])
-                    possible_moves.append(dec_tree_search_rec(next_tile,ticks-1,next_weight))
+                    possible_moves.append(FloAlgorithm.dec_tree_search_rec(player_index, map, next_tile, ticks-1, next_weight))
 
                 # try waiting a tick without moving
-                possible_moves.append(dec_tree_search_rec(start,ticks-1,0))
+                possible_moves.append(FloAlgorithm.dec_tree_search_rec(player_index, map, start, ticks-1, 0))
 
             if len(possible_moves) == 0:
                 return {"start":start,"end":-1,"weight":weight}
             else:
-                best_path = get_best_move(possible_moves)
-                return {"start":start,"end":best_path['start'],"weight":weight+best_path['weight']}
+                best_path = FloAlgorithm.get_best_move(possible_moves)
+                return {"start":start, "end":best_path['start'], "weight": weight + best_path['weight']}
 
-        def get_best_move(moves):
-            return reduce((lambda prev,cur: prev if prev['weight'] > cur['weight'] else cur),moves)
-
-        moves = []
-
-        for start in possible_starting_points:
-            moves.append(dec_tree_search_rec(start,max_ticks))
-
-        best = get_best_move(moves)
-        return Move(best['start'],best['end'])
+    def get_best_move(moves):
+        return reduce((lambda prev, cur: prev if prev['weight'] > cur['weight'] else cur), moves)
     
 
 class Collect:
@@ -307,10 +321,12 @@ class Collect:
         if map.enemy_tiles:
             enemy_target = Heuristics.choose_enemy_target_tile_by_lowest_army_fog_adjacent(map)
             if enemy_target is not None:
-                path_to_enemy = aStar(map, map.own_general, [enemy_target.tile])
+                path_to_enemy = aStar(map, map.own_general, [enemy_target[0]])
+                print(f'Path to Enemy: {path_to_enemy}')
                 return path_to_enemy
         
         # not enemy found, gather on own_general
+        print(f'No enemy found. Collect area: {[map.own_general]}')
         return [map.own_general] 
     
     @staticmethod
@@ -335,41 +351,39 @@ class Collect:
         
         return tile
 
-
 from math import ceil
 class Discover:
 
     @staticmethod
-    def expand_territory(bot:PythonBot, wait_ticks):
-        """Referred to as 'first' in flobot"""
+    def first_discover_branch(bot:PythonBot, wait_ticks):
+        """Referred to as 'first' in flobot. Discovers new tiles toward the center"""
         radius = Discover.armies_received_till_tick(wait_ticks + 1)
-        reachable_tiles = FloAlgorithm.bfs(bot,start_tile=bot.game.own_general, radius=radius)
+        reachable_tiles = FloAlgorithm.bfs(bot, start_tile=bot.game.own_general, radius=radius)
         discover_tile = Heuristics.choose_discover_tile(bot.game, reachable_tiles)
 
-        moves = FloAlgorithm.dijkstra(bot, start=bot.game.own_general, target=discover_tile)
+        print(f'own_general: {bot.game.as_coordinates(bot.game.own_general)} target: {bot.game.as_coordinates(discover_tile)} radius: {radius} discover_tile_distance: {bot.game.manhattan_distance(bot.game.own_general,discover_tile)}')
 
-        start = bot.game.own_general
-        for move in moves:
-            bot.move(start = start, end = move,caller='expand_territory')
-            start = move
+        # moves = FloAlgorithm.dijkstra(bot, start=bot.game.own_general, target=discover_tile)
+        moves = aStar(bot.game, bot.game.own_general, targets=[discover_tile])
+
+        print(f'first_discover_branch moves: {moves} width: {bot.game.width} height: {bot.game.height}')
+        bot.queue_moves(moves, caller='first_discover_branch')
+
 
     @staticmethod
-    def strategic_relocation(bot:PythonBot, wait_ticks):
-        """Referred to as 'second' in flobot"""
-        ticks = ceil((wait_ticks + 1) / 4)
+    def second_dicover_branch(bot:PythonBot, wait_ticks):
+        """Referred to as 'second' in flobot. takes as many tiles as possible until reinforcements come"""
+        ticks = ceil((wait_ticks + 1) / 2 / 2 )
         moveable_tiles = bot.game.get_moveable_army_tiles()
+        
         if moveable_tiles:
-            move = FloAlgorithm.dec_tree_search(bot.game.player_index,bot.game, moveable_tiles, ticks)
-            moves = aStar(bot.game,start=move.start,targets=[move.end])
+            start, end = FloAlgorithm.dec_tree_search(bot.game.player_index, bot.game, moveable_tiles, ticks)
 
-            moves = Move.ints_as_moves(moves)
-
-            for move in moves:
-                bot.move(move.start,move.end,caller='strategic_relocation')
+            bot.move(start, end, caller='second_dicover_branch')
 
     @staticmethod
     def armies_received_till_tick(tick):
-        return (tick / 2) + 1
+        return (tick / 2 ) + 1
 
 class Infiltrate:
     
@@ -399,8 +413,8 @@ class Infiltrate:
                 end = enemy_neighbour
             else:
                 # no adj enemy tile found, that could lead to enemy general search for nearest
-                path: list[Move] = Infiltrate.get_path_to_next_tile(bot, attack_source)
-                if path: 
+                path: list[int] = Infiltrate.get_path_to_next_tile(bot, attack_source)
+                if len(path) > 1: 
                     # path gets recalculated every move/infiltrate call
                     end = path[1]
             
@@ -417,7 +431,7 @@ class Infiltrate:
         return bot.last_attacked_tile != -1 and bot.game.terrain[bot.last_attacked_tile] == bot.game.player_index
     
     @staticmethod
-    def get_path_to_next_tile(bot: 'FloBot', start: int) -> list[Move]:
+    def get_path_to_next_tile(bot: 'FloBot', start: int) -> list[int]:
         """gets nearest tile to start which is adjacent to fog"""
         tiles_with_fog: list[int] = []
         for t, s in bot.game.enemy_tiles:
@@ -440,11 +454,8 @@ class RushGeneral:
         if not RushGeneral.try_to_kill_general(bot):
             if RushGeneral.collect_ticks_left > 0:
                 # collect units along the path toward the enemy general
-                moves = aStar(bot.game ,bot.game.own_general,[bot.game.enemy_general])
-                moves = Move.ints_as_moves(moves)
-
-                bot.collect_area = [move.start for move in moves]
-
+                bot.collect_area = aStar(bot.game ,bot.game.own_general,[bot.game.enemy_general])
+                bot.collect_area.pop()
                 Collect.collect(bot)
                 RushGeneral.collect_ticks_left -= 1
             elif RushGeneral.collect_ticks_left == 0:
@@ -456,28 +467,26 @@ class RushGeneral:
     @staticmethod
     def move_to_general(bot: 'FloBot', start: int):
         path_from_highest_army_to_general = aStar(bot.game,start,[bot.game.enemy_general])
-        path_from_highest_army_to_general = Move.ints_as_moves(path_from_highest_army_to_general)
 
-
-        # if length would be 1 there is only the general left to attack, but there aren't enough armies to kill him
-        if len(path_from_highest_army_to_general) > 1: # using 1 (vice 2) since our Move encapsulates start AND end, whereas javascript used list[int]
-            bot.move(start,path_from_highest_army_to_general.pop().end,caller='move_to_general')
+        # if length would be 2 there is only the general left to attack, but there aren't enough armies to kill him
+        if len(path_from_highest_army_to_general) > 2:
+            bot.move(start, path_from_highest_army_to_general[1], caller='move_to_general')
         else:
             RushGeneral.collect_ticks_left = RushGeneral.COLLECT_TICKS
 
     @staticmethod
-    def try_to_kill_general(bot: 'FloBot'):
-        """If player is adj to enemy general and have enough armies, attack and return True. Else return False"""
+    def try_to_kill_general(bot: PythonBot):
+        """If player is adj to enemy general and has enough armies, attack and return True. Else return False"""
         adj_tiles = bot.game.get_adjacent_tiles(bot.game.enemy_general)
         attackable_neighbours = []
 
         for next_tile in adj_tiles:
             if bot.game.terrain[next_tile] == bot.game.player_index:
                 if RushGeneral.has_enough_armies_to_attack_general(bot, next_tile):
-                    bot.move(next_tile, bot.game.enemy_general)
+                    bot.move(next_tile, bot.game.enemy_general, caller='try_to_kill_general')
                     bot.is_infiltrating = False
                     return True
-                elif bot.game.armies[next_tile] > 0:
+                elif bot.game.armies[next_tile] > 1:
                     attackable_neighbours.append(next_tile)
         
         if len(attackable_neighbours) > 1:
@@ -498,7 +507,7 @@ class RushGeneral:
                 highest_army_tile = neighbour
         
         if attackable_army_sum > bot.game.armies[bot.game.enemy_general]:
-            bot.move(highest_army_tile,bot.game.enemy_general)
+            bot.move(highest_army_tile,bot.game.enemy_general, caller='try_group_attack')
             return True
 
         return False
@@ -556,7 +565,7 @@ class Spread:
             if len(cur_node.moves) >= 1:
                 chosen_tile = cur_node.moves.pop()
 
-                bot.move(cur_node.tile, chosen_tile)
+                bot.move(cur_node.tile, chosen_tile, caller='spread')
                 Spread.remove_already_occupied_tiles(possible_moves, chosen_tile)
 
                 possible_moves.sort(reverse=True, key = lambda n: len(n.moves))
@@ -570,20 +579,6 @@ class Spread:
 
 if __name__ == "__main__":
 
-    from ggbot.core import RedisConnectionManager
-    import os
-    import json
-    uppath = lambda _path, n: os.sep.join(_path.split(os.sep)[:-n])
-
-    # Using the same config as other CorsairCoalition components
-    config_file = uppath(__file__, 2) + os.sep + 'config.json'
-    config: dict = json.load(open(config_file))
+    config = ggbot.utils.get_config_from_cmdline_args()    
     
-    # This is the main entry point for the bot.
-    with RedisConnectionManager(config['redisConfig']) as rcm:
-
-        # Instantiate bot and register it with Redis
-        rcm.register(FloBot(config['gameConfig']))
-
-        # Start listening for Redis messages
-        rcm.run()
+    FloBot().with_config(config).run()

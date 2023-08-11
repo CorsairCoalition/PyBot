@@ -1,16 +1,13 @@
 from ggbot.core import PythonBot
+import ggbot.utils
 from ggbot.algorithms import aStar
 import random
 
 
 class PathFinderBot(PythonBot):
-    """This bot demonstates how to use the aStar pathfinding algorithm to obtain a sequence of moves along a path"""
+    """This bot demonstates how to use the multi-target aStar algorithm to obtain a sequence of moves along a path"""
 
     WAIT_TICK_INTERVAL: int = 12
-
-    def __init__(self, game_config: dict) -> None:
-        super().__init__(game_config)
-        pass
 
     def do_turn(self) -> None:
 
@@ -35,25 +32,11 @@ class PathFinderBot(PythonBot):
 
         # send the moves to the movement queue
         self.queue_moves(path)
-
-
+     
 
 if __name__ == "__main__":
-
-    from ggbot.core import RedisConnectionManager
-    import os
-    import json
-    uppath = lambda _path, n: os.sep.join(_path.split(os.sep)[:-n])
     
-    # Using the same config as other CorsairCoalition components
-    config_file = uppath(__file__, 2) + os.sep + 'config.json'
-    config: dict = json.load(open(config_file))
+    config = ggbot.utils.get_config_from_cmdline_args()
     
-    # This is the main entry point for the bot.
-    with RedisConnectionManager(config['redisConfig']) as rcm:
+    PathFinderBot().with_config(config).run()
 
-        # Instantiate bot and register it with Redis
-        rcm.register(PathFinderBot(config['gameConfig']))
-
-        # Start listening for Redis messages
-        rcm.run()

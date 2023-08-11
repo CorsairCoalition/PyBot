@@ -19,29 +19,45 @@ class PythonBot(metaclass=ABCMeta):
 
     Raises:
         NotImplementedError: if the do_turn() method is not implemented
-
-    Args:
-        bot_id: a unique identifier for the bot. Must be unique across all bots.
     """
 
-    DEBUG: bool = False
     game: 'GameInstance'
-    redis_connetion: redis.Redis
-    pubsub: redis.client.PubSub
-    bot_id: str
-    channel_list: '__RedisChannelList__'
+    """Created whenever a game starts. Contains all the information about the game that is available to the bot.
+    Manages all map-related data for a bot including terrain, armies, cities, etc.
+
+    Map-related fields are updated for each bot before each turn automatically by the GG framework
+    This update is triggered when a turn message is received from the server.
+
+    Multiple helper methods are provided to make it easier to work with the map-related data.
+
+    Provides access to the following data:
+    - size (int) : The total number of tiles on the map.
+    - height (int) : The height of the map.
+    - width (int) : The width of the map.
+    - player_index (int) : The bot's player index.
+    - enemy_general (int) : The tile index of the enemy general.
+    - own_general (int) : The tile index of the bot's general.
+    - armies (list[int]) : A list of the all armie strengths on the map. 
+    - cities (list[int]) : Each entry is a tile index for a neutral city on the map.
+    - discovered_tiles (list[bool]): A list of booleans indicating whether each tile has been discovered.
+    - enemy_tiles (list[list[int]]) : A list of lists of the enemy tiles. Each entry is a tuple of the form [tile, strength].
+    - own_tiles (list[list[int]]) : A list of lists of the bot's tiles. Each entry is a tuple of the form [tile, strength].
+    - terrain (list[int]): represents EITHER the TERRAIN_TYPE or a player index. 
+
+    Usage:
+        For a given tile T, if the tile is owned by player  with playerIndex P, then terrain[T]==P, and armies[T] is the army strength S on tile T. If P is your own bot, then there's an item [tile,S] in own_tiles; otherwise, [tile,S] is an item in enemy_tiles.
+    """
+
     last_attacked_tile:int = -1
     queued_moves:int = 0
 
-    def __init__(self, game_config: dict[str,any]) -> None:
-        bot_prefix = game_config['BOT_ID_PREFIX']
-        
-        #hash userID to prevent it from entering a shared Redis database
-        bot_id = self.__hash_user_id__(game_config['userId'])
-
-        bot_id = bot_prefix + '-' + bot_id
-        self.bot_id = bot_id
-        self.channel_list = __RedisChannelList__(self.bot_id)
+    __redis_connetion__: redis.Redis
+    __pubsub__: redis.client.PubSub
+    __bot_id__: str
+    __channel_list__: '__RedisChannelList__'
+    __DEBUG__: bool = False
+    __initialized__: bool = False
+    __redis_config__: dict[str,str]
 
     @abstractmethod
     def do_turn():
@@ -61,41 +77,97 @@ class PythonBot(metaclass=ABCMeta):
             interrupt (bool, optional): If True, the server-side movement queue will be cleared. Defaults to False.
         """
         
-        if self.DEBUG and caller != '':
-            print(f'Move called by {caller}. tick: {self.game.tick} Start={start} End={end}') 
+        if self.__DEBUG__:
+            called_by = '' if caller == '' else f'Move called by {caller}: ' 
+            print(f'{called_by}Game tick: {self.game.tick} Start={self.game.as_coordinates(start)} End={self.game.as_coordinates(end)}') 
 
         self.last_attacked_tile = end
 
         self.queued_moves += 1
 
-        self.redis_connetion.publish(
-            self.channel_list.ACTION, __Action__.__serialize__(start, end, is50, interrupt))
+        self.__redis_connetion__.publish(
+            self.__channel_list__.ACTION, __Action__.__serialize__(start, end, is50, interrupt))
+        
+    @final
+    def with_debug(self,enable=True):
+        """Enables (or disables) debug mode on the bot."""
+        self.__DEBUG__ = enable
+        return self
 
     @final
     def queue_moves(self, path: list[int], caller:str = ''):
         """Queues moves along a path. 
         
         Assumptions: Assumes the order of tiles in the int list specify a valid list of moves on the game board. This method fails gracefully when a move is invalid."""
-        start_tile = path.pop()
+        start_tile = path.pop(0)
         for next_tile in path:
             
-            if not self.game.is_valid_move(start_tile,next_tile):
-                print(f'Attempted to queue invalid move from {start_tile} to {next_tile}!', file=sys.stderr)
+            if not self.game.is_valid_move(start_tile, next_tile):
+                print(f'{caller} attempted to queue invalid move from {self.game.as_coordinates(start_tile)} to {self.game.as_coordinates(next_tile)}!\nFull path: {path}', file=sys.stderr)
                 return
             
             self.move(start_tile, next_tile,caller=caller)
             start_tile = next_tile
 
     @final
+    def run(self):
+        """Runs the bot. The bot will listen for GameStart and Turn messages. When a game 
+        start method is received, the bot updates itself with a new GameInstance available 
+        via the bot.game field. When a turn message is received, the bot's do_turn() method
+        is called. 
+        
+        This method blocks until the connection is closed.
+        
+        Raises:
+            ValueError: if the bot's configuration has not been initialized using with_config() method
+        """
+
+        if not self.__initialized__:
+            raise ValueError("Bot must be initialized using the with_config() method before running the bot.")
+        
+        with __RedisConnectionManager__(self.__redis_config__) as rcm:
+            rcm.register(self)
+            rcm.run()
+
+    def with_config(self, config: dict[str,any]):
+        """A fluent method which configures the bot according to the config.json configuration file's contents. 
+
+        Note: This method must be called prior to running the bot.
+        
+        Args:
+            config (dict[str,any]): the bot configuration as defined in config.json. The dict must contain two nested dicts: `gameConfig` and `redisConfig`. The format for these are specified in the documentation at https://CorsairCoalition.github.io. The nested `gameConfig` dict must include the keys: `BOT_ID_PREFIX` and `userId`. The nested 'redisConfig' dict must include the keys: `HOST`, `POART`, `USERNAME`, and `PASSWORD`. 
+        """
+
+        self.__DEBUG__ = config.get('GGBOT_DEBUG', False)
+        
+        game_config = config['gameConfig']
+
+        bot_prefix = game_config['BOT_ID_PREFIX']
+        
+        #hash userID to prevent it from entering a shared Redis database
+        bot_id = self.__hash_user_id__(game_config['userId'])
+
+        bot_id = bot_prefix + '-' + bot_id
+        self.__bot_id__ = bot_id
+        self.__channel_list__ = __RedisChannelList__(self.__bot_id__)
+
+        self.__redis_config__ = config['redisConfig']
+
+        self.__initialized__ = True
+
+        return self
+
+    @final
     def __handle_turn_channel_message__(self, turn_message: str) -> None:
         self.__update_state__()
-        self.queued_moves = max(0,self.queued_moves -1)
+        if self.queued_moves > 0:
+            self.queued_moves -= 1
         self.do_turn()
 
     @final
     def __update_state__(self):
-        update_data = self.redis_connetion.hgetall(
-            f'{self.bot_id}-{self.game.replay_id}')
+        update_data = self.__redis_connetion__.hgetall(
+            f'{self.__bot_id__}-{self.game.replay_id}')
         game_state_data_dict = dict({k.decode(): json.loads(
             v.decode()) for k, v in update_data.items()})
         self.game.update(game_state_data_dict)
@@ -107,7 +179,7 @@ class PythonBot(metaclass=ABCMeta):
 
     @final
     def __is_game_start_message__(self, message: dict) -> bool:
-        if message['channel'].decode() == self.channel_list.STATE:
+        if message['channel'].decode() == self.__channel_list__.STATE:
             data = json.loads(message['data'].decode())
             return 'game_start' in data.keys()
         return False
@@ -122,9 +194,9 @@ class PythonBot(metaclass=ABCMeta):
 
     @final
     def __register_redis__(self, r_conn: redis.Redis, pubsub: redis.client.PubSub):
-        self.redis_connetion = r_conn
+        self.__redis_connetion__ = r_conn
 
-        for channel in [self.channel_list.TURN, self.channel_list.STATE]:
+        for channel in [self.__channel_list__.TURN, self.__channel_list__.STATE]:
             pubsub.subscribe(channel)
 
             # First message should always be a subscription confirmation
@@ -132,7 +204,7 @@ class PythonBot(metaclass=ABCMeta):
                 print(
                     f"Failed to subscribe to {channel} channel. Terminating.", file=sys.stderr)
                 exit()
-            print(f"Successfully subscribed to {channel} for: {self.bot_id}")
+            print(f"Successfully subscribed to {channel} for: {self.__bot_id__}")
 
 class TERRAIN_TYPES:
     """Server-defined terrain types"""
@@ -179,32 +251,7 @@ class Move(NamedTuple):
 
 @final
 class GameInstance:
-    """Created whenever a game starts. Contains all the information about the game that is available to the bot.
-    Manages all map-related data for a bot including terrain, armies, cities, etc.
-
-    Map objects are updated for each bot before each turn automatically by the framework
-    whenever a turn message is received from the server. The map object is accessible
-    through the game object, e.g. `game.map`.
-
-    Multiple helper methods are provided to make it easier to work with the map data.
-
-    Provides access to the following data:
-    - size (int) : The total number of tiles on the map.
-    - height (int) : The height of the map.
-    - width (int) : The width of the map.
-    - player_index (int) : The bot's player index.
-    - enemy_general (int) : The tile index of the enemy general.
-    - own_general (int) : The tile index of the bot's general.
-    - armies (list[int]) : A list of the all armie strengths on the map. 
-    - cities (list[int]) : Each entry is a tile index for a neutral city on the map.
-    - discovered_tiles (list[bool]): A list of booleans indicating whether each tile has been discovered.
-    - enemy_tiles (list[list[int]]) : A list of lists of the enemy tiles. Each entry is a tuple of the form [tile, strength].
-    - own_tiles (list[list[int]]) : A list of lists of the bot's tiles. Each entry is a tuple of the form [tile, strength].
-    - terrain (list[int]): represents EITHER the TERRAIN_TYPE or a player index. 
-
-    Usage:
-        For a given tile T, if the tile is owned by player  with playerIndex P, then terrain[T]==P, and armies[T] is the army strength S on tile T. If P is your own bot, then there's an item [tile,S] in own_tiles; otherwise, [tile,S] is an item in enemy_tiles.
-
+    """
     Args:
         game_start_message (dict): The game_start message from the redis channel.
     """
@@ -280,7 +327,7 @@ class GameInstance:
             ignore_cities (bool, optional): If the passable check should mark cities as impassible. Defaults to True.
 
         Returns:
-            bool: _description_
+            bool: True if the target is in bounds, not a mountain/fog/off-limits type, and not a city (unless ignore_cities = False)
         """
         return all([
             tile >= 0 and tile < self.size,  # bounds check
@@ -320,7 +367,7 @@ class GameInstance:
 
     def is_valid_move(self, start: int, target: int) -> bool:
         """Checks that the move is at most 1 tile away and the start and end tiles are passable"""
-        all([
+        return all([
             self.manhattan_distance(start, target) == 1,
             self.is_passable(start),
             self.is_passable(target)
@@ -403,7 +450,7 @@ class __RedisChannelList__:
         self.STATE = f"{bot_id}-state"
 
 @final
-class RedisConnectionManager:
+class __RedisConnectionManager__:
     """This class will handle all Redis connections and subscriptions for Python bots. 
     Register bots with the register() method. The bot will be notified when a 
     game starts or when a turn is taken.
@@ -414,6 +461,11 @@ class RedisConnectionManager:
         redis_config (dict): a dictinoary used to instantiate a Redis object (cf. params for Redis.__init__). Typically includes keys: host, port, username, password, ssl
     """
 
+    __channel_map__: dict[str, callable] = {}
+
+    __redis_connection__: redis.Redis
+    __pubsub__: redis.client.PubSub
+
     def __init__(self, redis_config: dict) -> None:
         redis_config = self.__fix_config_keys__(redis_config)
         
@@ -421,7 +473,7 @@ class RedisConnectionManager:
         self.__redis_connection__ = redis.Redis(
             **(redis_config), client_name="Python_RedisConnectionManager")
 
-        # Subscribe to redis channel(s)
+        # Pubsub ready to subscribe to redis channel(s)
         self.__pubsub__ = self.__redis_connection__.pubsub()
 
     def run(self):
@@ -435,13 +487,9 @@ class RedisConnectionManager:
 
         # Start listening for Redis messages
         for message in self.__pubsub__.listen():
-            # try:
                 channel: str = message['channel'].decode()
                 self.__channel_map__[channel](message)
-            # except KeyError:
-            #     print(
-            #         f"Received unknown message type: {message}", file=sys.stderr)
-
+            
     def register(self, bot: PythonBot):
         """Registers a bot with this connection manager. 
 
@@ -457,14 +505,11 @@ class RedisConnectionManager:
         bot.__register_redis__(self.__redis_connection__,
                                self.__pubsub__)        
         self.__channel_map__[
-            bot.channel_list.TURN] = bot.__handle_turn_channel_message__
+            bot.__channel_list__.TURN] = bot.__handle_turn_channel_message__
         self.__channel_map__[
-            bot.channel_list.STATE] = bot.__handle_state_channel_message__
+            bot.__channel_list__.STATE] = bot.__handle_state_channel_message__
 
-    __channel_map__: dict[str, callable] = {}
-
-    __redis_connection__: redis.Redis
-    __pubsub__: redis.client.PubSub
+        return self
 
     def __enter__(self):
         return self
