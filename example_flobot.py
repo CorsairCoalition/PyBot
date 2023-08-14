@@ -301,6 +301,9 @@ class FloAlgorithm:
 
             if len(possible_moves) == 0:
                 return {"start":start,"end":-1,"weight":weight}
+            elif len(possible_moves) == 1:
+                best_path = possible_moves.pop(0)
+                return {"start":start, "end":best_path['start'], "weight": weight + best_path['weight']}
             else:
                 best_path = FloAlgorithm.get_best_move(possible_moves)
                 return {"start":start, "end":best_path['start'], "weight": weight + best_path['weight']}
@@ -322,11 +325,9 @@ class Collect:
             enemy_target = Heuristics.choose_enemy_target_tile_by_lowest_army_fog_adjacent(map)
             if enemy_target is not None:
                 path_to_enemy = aStar(map, map.own_general, [enemy_target[0]])
-                print(f'Path to Enemy: {path_to_enemy}')
                 return path_to_enemy
         
         # not enemy found, gather on own_general
-        print(f'No enemy found. Collect area: {[map.own_general]}')
         return [map.own_general] 
     
     @staticmethod
@@ -361,12 +362,9 @@ class Discover:
         reachable_tiles = FloAlgorithm.bfs(bot, start_tile=bot.game.own_general, radius=radius)
         discover_tile = Heuristics.choose_discover_tile(bot.game, reachable_tiles)
 
-        print(f'own_general: {bot.game.as_coordinates(bot.game.own_general)} target: {bot.game.as_coordinates(discover_tile)} radius: {radius} discover_tile_distance: {bot.game.manhattan_distance(bot.game.own_general,discover_tile)}')
-
         # moves = FloAlgorithm.dijkstra(bot, start=bot.game.own_general, target=discover_tile)
         moves = aStar(bot.game, bot.game.own_general, targets=[discover_tile])
 
-        print(f'first_discover_branch moves: {moves} width: {bot.game.width} height: {bot.game.height}')
         bot.queue_moves(moves, caller='first_discover_branch')
 
 
@@ -455,7 +453,8 @@ class RushGeneral:
             if RushGeneral.collect_ticks_left > 0:
                 # collect units along the path toward the enemy general
                 bot.collect_area = aStar(bot.game ,bot.game.own_general,[bot.game.enemy_general])
-                bot.collect_area.pop()
+                if bot.collect_area:
+                    bot.collect_area.pop()
                 Collect.collect(bot)
                 RushGeneral.collect_ticks_left -= 1
             elif RushGeneral.collect_ticks_left == 0:
