@@ -578,6 +578,7 @@ class Spread:
 
 if __name__ == "__main__":
 
+    #config = ggbot.utils.get_config_from_file("../config.json")
     config = ggbot.utils.get_config_from_cmdline_args()    
     
     FloBot().with_config(config).run()

@@ -36,6 +36,7 @@ class PathFinderBot(PythonBot):
 
 if __name__ == "__main__":
     
+    #config = ggbot.utils.get_config_from_file("../config.json")
     config = ggbot.utils.get_config_from_cmdline_args()
     
     PathFinderBot().with_config(config).run()

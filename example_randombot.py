@@ -23,7 +23,7 @@ class RandomBot(PythonBot):
 
 if __name__ == "__main__":
     
+    #config = ggbot.utils.get_config_from_file("../config.json")
     config = ggbot.utils.get_config_from_cmdline_args()    
-    # config = ggbot.utils.get_config_from_file('config.pybot1.json')
     
     RandomBot().with_config(config).run()
