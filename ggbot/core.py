@@ -486,9 +486,14 @@ class __RedisConnectionManager__:
         """
 
         # Start listening for Redis messages
-        for message in self.__pubsub__.listen():
+        try:
+            for message in self.__pubsub__.listen():
                 channel: str = message['channel'].decode()
                 self.__channel_map__[channel](message)
+        except KeyboardInterrupt:
+            print("\nKeyboardInterrupt detected. Gracefully terminating.", file=sys.stderr)
+            self.__pubsub__.close()
+            exit()
             
     def register(self, bot: PythonBot):
         """Registers a bot with this connection manager. 
